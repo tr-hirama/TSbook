@@ -1,0 +1,7 @@
+# local dev / editor config
+.claude/
+test/
+
+# never commit large sample archives / images
+*.zip
+*.avif
