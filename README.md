@@ -1,9 +1,9 @@
-# Rebook
+# TSbook
 
 ブラウザだけで動く **AVIF 画像ビューワー / ZIP 対応コミックリーダー**。
 単一の `index.html` のみ。ビルド不要・追加ライブラリ不要・完全クライアント処理。
 
-🔗 ライブデモ: https://tr-hirama.github.io/Rebook/
+🔗 ライブデモ: https://tr-hirama.github.io/TSbook/
 
 ## 特長
 
