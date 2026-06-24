@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>TSbook — AVIF / JPG Viewer</title>
+<title>TSbook — AVIF / JPG / PDF Viewer</title>
 <style>
   :root{
     --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a313c;
@@ -191,7 +191,7 @@
   <span class="warn" id="warn">⚠ このブラウザはAVIF表示に未対応の可能性があります</span>
   <span class="spacer"></span>
   <button class="btn" id="clearBtn" title="すべてクリア">クリア</button>
-  <input type="file" id="fileInput" class="hidefile" multiple accept=".avif,.avifs,.zip,image/avif,image/*">
+  <input type="file" id="fileInput" class="hidefile" multiple accept=".avif,.avifs,.zip,.pdf,image/avif,image/*,application/pdf">
   <input type="file" id="folderInput" class="hidefile" webkitdirectory multiple>
 </header>
 
@@ -210,8 +210,8 @@
         <path d="M21 15l-5-5L5 21"/>
       </svg>
       <div>
-        <div style="font-size:16px;color:var(--fg);margin-bottom:6px" id="emptyTitle">AVIF・JPG 画像や ZIP をドラッグ＆ドロップ</div>
-        <div class="hint" id="emptyHint">または <kbd>ファイルを開く</kbd> / <kbd>フォルダを開く</kbd>　・　AVIF/JPG/PNG/WebP 対応、ZIP内の構造はツリー表示</div>
+        <div style="font-size:16px;color:var(--fg);margin-bottom:6px" id="emptyTitle">AVIF・JPG・PDF や ZIP をドラッグ＆ドロップ</div>
+        <div class="hint" id="emptyHint">または <kbd>ファイルを開く</kbd> / <kbd>フォルダを開く</kbd>　・　AVIF/JPG/PNG/WebP/PDF 対応、ZIP内の構造はツリー表示</div>
       </div>
     </div>
     <div class="grid" id="grid"></div>
@@ -256,6 +256,7 @@
   <div class="filmstrip" id="filmstrip"></div>
 </div>
 
+<script src="vendor/pdf.min.js"></script>
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
@@ -296,17 +297,16 @@ function mimeFromName(n){
 /* ===== item model =====
    item = { path, name, size, w, h, _url, get():Promise<Blob|File> } */
 function makeFileItem(file, path){
-  return { path, name:base(path), size:file.size, w:0, h:0, _url:null, get:()=>Promise.resolve(file) };
+  return { path, name:base(path), size:file.size, w:0, h:0, _url:null, _p:null, get:()=>Promise.resolve(file) };
 }
 function makeZipItem(file, en, prefix){
-  return { path: prefix+en.name, name:base(en.name), size:en.uncompSize, w:0, h:0, _url:null,
+  return { path: prefix+en.name, name:base(en.name), size:en.uncompSize, w:0, h:0, _url:null, _p:null,
            get:()=> zipEntryBlob(file, en) };
 }
 async function itemURL(it){
   if(it._url) return it._url;
-  const blob = await it.get();
-  it._url = URL.createObjectURL(blob);
-  return it._url;
+  if(!it._p) it._p = it.get().then(blob=>{ it._url = URL.createObjectURL(blob); it._p = null; return it._url; });
+  return it._p;
 }
 function releaseURLsExcept(keep){
   for(const it of library){
@@ -406,14 +406,69 @@ async function zipEntryBlob(file, en){
 async function loadZipItems(file){
   const entries = await parseZip(file);
   const stem = file.name.replace(/\.zip$/i, "");
-  const imgEntries = entries.filter(en => !en.name.endsWith('/') && IMG_RE.test(en.name));
-  if(!imgEntries.length) throw new Error("ZIP内に画像が見つかりません");
-  // Avoid a redundant root: if every image already lives under one common top
+  const wanted = entries.filter(en => !en.name.endsWith('/') && (IMG_RE.test(en.name) || PDF_RE.test(en.name)));
+  if(!wanted.length) throw new Error("ZIP内に画像/PDFが見つかりません");
+  // Avoid a redundant root: if everything already lives under one common top
   // folder that matches the archive name, don't prepend the archive name again.
-  const tops = new Set(imgEntries.map(en => en.name.split('/')[0]));
+  const tops = new Set(wanted.map(en => en.name.split('/')[0]));
   const prefix = (tops.size === 1 && [...tops][0] === stem) ? "" : stem + "/";
-  return imgEntries.map(en => makeZipItem(file, en, prefix));
+  const out = [];
+  for(const en of wanted){
+    if(PDF_RE.test(en.name)){
+      setStatus("PDF読込中… " + base(en.name));
+      try{ out.push(...await loadPdfItems(pdfSourceFromZip(file, en), prefix + en.name)); }
+      catch(err){ console.warn("PDF skip:", en.name, err); }
+    } else {
+      out.push(makeZipItem(file, en, prefix));
+    }
+  }
+  return out;
 }
+
+/* ===== PDF (pdf.js → pages rendered to images) ===== */
+if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+const PDF_RE = /\.pdf$/i;
+const PDF_MAXDIM = 1500;   // render target for the longer side (px)
+
+async function pdfDoc(src){
+  if(src._doc) return src._doc;
+  if(!window.pdfjsLib) throw new Error("PDF.js が読み込めていません");
+  if(!src._docP){
+    src._docP = (async ()=>{
+      const bytes = await src.getBytes();
+      const d = await pdfjsLib.getDocument({ data: bytes }).promise;
+      src._doc = d; return d;
+    })();
+  }
+  return src._docP;
+}
+async function renderPdfPageBlob(src, pageNum){
+  const doc = await pdfDoc(src);
+  const page = await doc.getPage(pageNum);
+  const v1 = page.getViewport({ scale: 1 });
+  const scale = Math.min(3, Math.max(0.2, PDF_MAXDIM / Math.max(v1.width, v1.height)));
+  const vp = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  return await new Promise(res => canvas.toBlob(res, 'image/png'));
+}
+async function loadPdfItems(src, basePath){
+  const doc = await pdfDoc(src);
+  const n = doc.numPages;
+  const pad = Math.max(4, String(n).length);
+  const items = [];
+  for(let i=1;i<=n;i++){
+    const num = String(i).padStart(pad, '0');
+    items.push({ path: basePath + '/' + num, name: num, kind:'pdf', pageNum:i,
+      size:0, w:0, h:0, _url:null, _p:null, get: ()=> renderPdfPageBlob(src, i) });
+  }
+  return items;
+}
+function pdfSourceFromFile(file){ return { getBytes: async ()=> new Uint8Array(await file.arrayBuffer()), _doc:null, _docP:null }; }
+function pdfSourceFromZip(file, en){ return { getBytes: async ()=> new Uint8Array(await (await zipEntryBlob(file, en)).arrayBuffer()), _doc:null, _docP:null }; }
 
 /* ===== tree ===== */
 function buildTree(items){
@@ -477,7 +532,7 @@ function renderChildren(node, parent, depth){
     const tog = document.createElement('span'); tog.className="tog";
     tog.textContent = (d.dirs.size || d.files.length) ? (open?"▾":"▸") : "·";
     tog.onclick = e=>{ e.stopPropagation(); open?expanded.delete(d.path):expanded.add(d.path); renderTree(); };
-    const ic = document.createElement('span'); ic.className="ticon"; ic.textContent="📁";
+    const ic = document.createElement('span'); ic.className="ticon"; ic.textContent=/\.pdf$/i.test(d.name)?"📕":"📁";
     const nm = document.createElement('span'); nm.className="tname"; nm.textContent=d.name; nm.title=d.name;
     const cn = document.createElement('span'); cn.className="tcount"; cn.textContent=countImages(d);
     row.append(tog, ic, nm, cn);
@@ -564,9 +619,15 @@ function openFileFromTree(f){
 function setStatus(m){ $('#count').textContent = m; }
 async function ingest(list){           // list: [{file, path}]
   const zips = list.filter(x=> /\.zip$/i.test(x.file.name));
-  const imgs = list.filter(x=> isImg(x.file));
+  const pdfs = list.filter(x=> PDF_RE.test(x.file.name));
+  const imgs = list.filter(x=> isImg(x.file) && !PDF_RE.test(x.file.name));
   const added = [];
   for(const x of imgs) added.push(makeFileItem(x.file, x.path));
+  for(const x of pdfs){
+    setStatus("PDF読込中… " + x.file.name);
+    try{ added.push(...await loadPdfItems(pdfSourceFromFile(x.file), x.path)); }
+    catch(err){ alert("PDF読み込み失敗: " + x.file.name + "\n" + err.message); }
+  }
   for(const z of zips){
     setStatus("ZIP解析中… " + z.file.name);
     try{ added.push(...await loadZipItems(z.file)); }
@@ -614,7 +675,9 @@ async function loadCurrent(){
   if(my !== loadToken) return;          // navigated away
   vImg.onload = ()=>{
     it.w=vImg.naturalWidth; it.h=vImg.naturalHeight;
-    $('#vMeta').textContent = `${it.w}×${it.h}　${fmtSize(it.size)}`;
+    $('#vMeta').textContent = it.kind==='pdf'
+      ? `${it.w}×${it.h}　PDF p.${it.pageNum}`
+      : `${it.w}×${it.h}　${fmtSize(it.size)}`;
     fitToScreen();
   };
   vImg.src = url;
@@ -767,7 +830,8 @@ treeRoot = buildTree([]); renderTree();
 /* test hooks */
 window.__app = { ingest, get library(){return library}, get gallery(){return gallery},
   get treeRoot(){return treeRoot}, get selectedPath(){return selectedPath},
-  selectNode, nodeByPath, openViewer, parseZip, loadZipItems };
+  selectNode, nodeByPath, openViewer, parseZip, loadZipItems,
+  loadPdfItems, pdfSourceFromFile, renderPdfPageBlob, hasPdfLib:()=>!!window.pdfjsLib };
 </script>
 </body>
 </html>
