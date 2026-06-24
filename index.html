@@ -72,13 +72,27 @@
   .trow.tfile:hover .tname, .trow.tfile.sel .tname{color:var(--fg)}
 
   #galleryWrap{flex:1 1 auto; overflow:auto; position:relative; min-width:0}
+  .galbar{
+    display:none; position:sticky; top:0; z-index:3; align-items:center; gap:8px;
+    padding:6px 12px; background:rgba(14,17,22,.94); border-bottom:1px solid var(--line);
+  }
   .crumb{
-    display:none; position:sticky; top:0; z-index:1; padding:7px 14px; font-size:12px;
-    color:var(--muted); background:rgba(14,17,22,.92); border-bottom:1px solid var(--line);
+    font-size:12px; color:var(--muted); min-width:0;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
-  body.has-tree .crumb{display:block}
   .crumb b{color:var(--fg)}
+  .gbspace{flex:1 1 auto}
+  .sortbtns{display:flex; align-items:center; gap:5px; flex:0 0 auto}
+  .gblabel{font-size:11px; color:var(--muted)}
+  .gbtn{
+    padding:4px 9px; font-size:12px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:7px; color:var(--fg); white-space:nowrap;
+  }
+  .gbtn:hover{background:#27313d; border-color:#3a4452}
+  .gbtn.on{background:var(--accent2); border-color:var(--accent2); color:#fff}
+  .tile.dragging{opacity:.4; outline:2px dashed var(--accent); outline-offset:-2px}
+  .tile.drop-before{box-shadow:-4px 0 0 0 var(--accent)}
+  .tile.drop-after{box-shadow:4px 0 0 0 var(--accent)}
 
   .empty{
     position:absolute; inset:0; display:flex; flex-direction:column;
@@ -202,7 +216,17 @@
   </aside>
 
   <section id="galleryWrap">
-    <div class="crumb" id="crumb"></div>
+    <div class="galbar" id="galbar">
+      <span class="crumb" id="crumb"></span>
+      <span class="gbspace"></span>
+      <span class="sortbtns">
+        <span class="gblabel">並び替え</span>
+        <button class="gbtn" id="sortAsc" title="名前 昇順（既定の順）">昇順</button>
+        <button class="gbtn" id="sortDesc" title="名前 降順">降順</button>
+        <button class="gbtn" id="reverseBtn" title="現在の順序を逆に">逆順</button>
+        <span class="gblabel" title="サムネイルをドラッグ＆ドロップで任意の位置へ移動">⠿ ドラッグで手動</span>
+      </span>
+    </div>
     <div class="empty" id="empty">
       <svg width="86" height="86" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
         <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -269,6 +293,8 @@ let expanded = new Set();
 let selectedPath = null;
 let curIndex = -1;
 let loadToken = 0;
+let customOrder = new Map();  // folderPath -> [item.path,...] (manual / non-default order)
+let dragFrom = -1;            // gallery index being dragged
 
 /* ===== AVIF support check ===== */
 (function(){
@@ -573,40 +599,78 @@ function totalImages(){ return library.length; }
 function updateCount(){ $('#count').textContent = library.length ? `${gallery.length} / ${library.length} 枚` : ""; }
 
 function renderGallery(){
+  const gw = $('#galleryWrap'); const keepScroll = gw.scrollTop;
   const grid = $('#grid'); grid.innerHTML = "";
   $('#empty').style.display = gallery.length ? "none" : "flex";
+  $('#galbar').style.display = gallery.length ? "flex" : "none";
   updateCount();
   const crumb = $('#crumb');
-  if(document.body.classList.contains('has-tree')){
-    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
-    crumb.innerHTML = selectedPath ? ("📁 <b>"+esc(base(selectedPath)||"(ルート)")+"</b>　"+gallery.length+" 枚")
-                                   : "ツリーからフォルダを選択してください";
-    crumb.title = selectedPath || "";
-  }
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  if(document.body.classList.contains('has-tree') && selectedPath)
+    crumb.innerHTML = "📁 <b>"+esc(base(selectedPath)||"(ルート)")+"</b>　"+gallery.length+" 枚";
+  else
+    crumb.innerHTML = gallery.length ? (gallery.length+" 枚") : "";
+  crumb.title = selectedPath || "";
+  const aBtn = $('#sortAsc'); if(aBtn) aBtn.classList.toggle('on', !customOrder.has(selectedPath));
+
   const frag = document.createDocumentFragment();
   gallery.forEach((it,i)=>{
-    const tile = document.createElement('div'); tile.className="tile"; tile._item=it;
+    const tile = document.createElement('div'); tile.className="tile"; tile._item=it; tile.draggable=true;
     const thumb = document.createElement('div'); thumb.className="thumb";
-    const img = document.createElement('img'); img.alt=it.name; img.decoding="async";
+    const img = document.createElement('img'); img.alt=it.name; img.decoding="async"; img.draggable=false;
     img.addEventListener('load', ()=>{ it.w=img.naturalWidth; it.h=img.naturalHeight; }, {once:true});
     thumb.appendChild(img);
     const cap = document.createElement('div'); cap.className="cap"; cap.textContent=it.name; cap.title=it.path;
     tile.append(thumb, cap);
     tile.onclick = ()=> openViewer(i);
+    // manual reorder (drag & drop within the gallery)
+    tile.addEventListener('dragstart', e=>{ dragFrom=i; tile.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/x-tsbook', String(i)); });
+    tile.addEventListener('dragend', ()=>{ dragFrom=-1; tile.classList.remove('dragging'); clearDropMarks(); });
+    tile.addEventListener('dragover', e=>{ if(dragFrom<0) return; e.preventDefault(); e.dataTransfer.dropEffect='move'; const after=isAfter(tile,e); clearDropMarks(); tile.classList.add(after?'drop-after':'drop-before'); });
+    tile.addEventListener('dragleave', ()=>{ tile.classList.remove('drop-before','drop-after'); });
+    tile.addEventListener('drop', e=>{ if(dragFrom<0) return; e.preventDefault(); moveGalleryItem(dragFrom, i + (isAfter(tile,e)?1:0)); });
     frag.appendChild(tile);
     io.observe(tile);
   });
   grid.appendChild(frag);
-  $('#galleryWrap').scrollTop = 0;
+  gw.scrollTop = keepScroll;
+}
+function isAfter(tile, e){ const r=tile.getBoundingClientRect(); return e.clientX > r.left + r.width/2; }
+function clearDropMarks(){ for(const t of document.querySelectorAll('#grid .tile.drop-before, #grid .tile.drop-after')) t.classList.remove('drop-before','drop-after'); }
+
+/* ===== ordering: sort presets + manual drag ===== */
+function currentItems(){ return collectImages(nodeByPath(selectedPath), []); }
+function applyOrder(items, folderPath){
+  const ord = customOrder.get(folderPath);
+  if(!ord) return items.slice().sort((a,b)=> natCmp(a.path, b.path));
+  const idx = new Map(ord.map((p,i)=>[p,i]));
+  return items.slice().sort((a,b)=>{
+    const ia = idx.has(a.path)?idx.get(a.path):Infinity, ib = idx.has(b.path)?idx.get(b.path):Infinity;
+    return ia!==ib ? ia-ib : natCmp(a.path,b.path);
+  });
+}
+function saveOrder(){ if(selectedPath!==null) customOrder.set(selectedPath, gallery.map(it=>it.path)); }
+function sortAsc(){ customOrder.delete(selectedPath); gallery = applyOrder(currentItems(), selectedPath); renderGallery(); }
+function sortDesc(){ gallery = currentItems().sort((a,b)=> natCmp(b.path, a.path)); saveOrder(); renderGallery(); }
+function reverseGallery(){ gallery = gallery.slice().reverse(); saveOrder(); renderGallery(); }
+function moveGalleryItem(from, ins){
+  if(from<0 || from>=gallery.length) return;
+  const item = gallery[from];
+  gallery.splice(from, 1);
+  if(from < ins) ins--;
+  ins = Math.max(0, Math.min(gallery.length, ins));
+  gallery.splice(ins, 0, item);
+  saveOrder(); renderGallery();
 }
 
 function selectNode(node){
   selectedPath = node.path;
-  const imgs = collectImages(node, []).sort((a,b)=> natCmp(a.path, b.path));
+  const imgs = applyOrder(collectImages(node, []), node.path);
   releaseURLsExcept(new Set(imgs));
   gallery = imgs;
   renderTree();
   renderGallery();
+  $('#galleryWrap').scrollTop = 0;
 }
 function openFileFromTree(f){
   const parent = nodeByPath(f.path.split('/').slice(0,-1).join('/'));
@@ -645,6 +709,7 @@ function clearAll(){
   stopSlide(); closeViewer();
   releaseURLsExcept(null);
   library = []; gallery = []; selectedPath = null;
+  customOrder = new Map();
   treeRoot = buildTree([]); expanded = new Set();
   document.body.classList.remove('has-tree');
   renderTree(); renderGallery();
@@ -791,6 +856,9 @@ $('#openFolder').onclick=()=>$('#folderInput').click();
 $('#fileInput').onchange=e=>{ ingest(filesToList(e.target.files)); e.target.value=""; };
 $('#folderInput').onchange=e=>{ ingest(filesToList(e.target.files)); e.target.value=""; };
 $('#clearBtn').onclick=clearAll;
+$('#sortAsc').onclick=sortAsc;
+$('#sortDesc').onclick=sortDesc;
+$('#reverseBtn').onclick=reverseGallery;
 
 $('#closeV').onclick=closeViewer;
 $('#prevBtn').onclick=()=>step(-1); $('#navPrev').onclick=()=>step(-1);
@@ -803,11 +871,12 @@ $('#slideBtn').onclick=toggleSlide;
 $('#dlPng').onclick=()=>download('image/png','png');
 $('#dlJpg').onclick=()=>download('image/jpeg','jpg',0.92);
 
+const hasFiles = dt => !!dt && [...(dt.types||[])].includes('Files');   // external file drop vs internal tile drag
 let dragDepth=0;
-window.addEventListener('dragenter', e=>{ e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
-window.addEventListener('dragover', e=>{ e.preventDefault(); e.dataTransfer.dropEffect="copy"; });
-window.addEventListener('dragleave', ()=>{ if(--dragDepth<=0){ dragDepth=0; document.body.classList.remove('dragging'); } });
-window.addEventListener('drop', e=>{ e.preventDefault(); dragDepth=0; document.body.classList.remove('dragging'); handleDrop(e.dataTransfer); });
+window.addEventListener('dragenter', e=>{ if(!hasFiles(e.dataTransfer)) return; e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragover', e=>{ if(!hasFiles(e.dataTransfer)) return; e.preventDefault(); e.dataTransfer.dropEffect="copy"; });
+window.addEventListener('dragleave', e=>{ if(!hasFiles(e.dataTransfer)) return; if(--dragDepth<=0){ dragDepth=0; document.body.classList.remove('dragging'); } });
+window.addEventListener('drop', e=>{ if(!hasFiles(e.dataTransfer)) return; e.preventDefault(); dragDepth=0; document.body.classList.remove('dragging'); handleDrop(e.dataTransfer); });
 
 window.addEventListener('keydown', e=>{
   if(!viewer.classList.contains('open')) return;
@@ -831,7 +900,8 @@ treeRoot = buildTree([]); renderTree();
 window.__app = { ingest, get library(){return library}, get gallery(){return gallery},
   get treeRoot(){return treeRoot}, get selectedPath(){return selectedPath},
   selectNode, nodeByPath, openViewer, parseZip, loadZipItems,
-  loadPdfItems, pdfSourceFromFile, renderPdfPageBlob, hasPdfLib:()=>!!window.pdfjsLib };
+  loadPdfItems, pdfSourceFromFile, renderPdfPageBlob, hasPdfLib:()=>!!window.pdfjsLib,
+  sortAsc, sortDesc, reverseGallery, moveGalleryItem, get customOrder(){return customOrder} };
 </script>
 </body>
 </html>
