@@ -73,7 +73,7 @@
 
   #galleryWrap{flex:1 1 auto; overflow:auto; position:relative; min-width:0}
   .galbar{
-    display:none; position:sticky; top:0; z-index:3; align-items:center; gap:8px;
+    display:none; position:sticky; top:0; z-index:3; align-items:center; gap:8px 10px; flex-wrap:wrap;
     padding:6px 12px; background:rgba(14,17,22,.94); border-bottom:1px solid var(--line);
   }
   .crumb{
@@ -84,6 +84,7 @@
   .gbspace{flex:1 1 auto}
   .sortbtns{display:flex; align-items:center; gap:5px; flex:0 0 auto}
   .gblabel{font-size:11px; color:var(--muted)}
+  .gbsep{width:1px; height:20px; background:var(--line); flex:0 0 auto}
   .gbtn{
     padding:4px 9px; font-size:12px; background:var(--panel2); border:1px solid var(--line);
     border-radius:7px; color:var(--fg); white-space:nowrap;
@@ -220,6 +221,12 @@
       <span class="crumb" id="crumb"></span>
       <span class="gbspace"></span>
       <span class="sortbtns">
+        <span class="gblabel">保存</span>
+        <button class="gbtn" id="saveZip" title="このフォルダ/巻を並び順のままZIPで保存">ZIP</button>
+        <button class="gbtn" id="savePdf" title="このフォルダ/巻を並び順のままPDFで保存">PDF</button>
+      </span>
+      <span class="gbsep"></span>
+      <span class="sortbtns">
         <span class="gblabel">並び替え</span>
         <button class="gbtn" id="sortAsc" title="名前 昇順（既定の順）">昇順</button>
         <button class="gbtn" id="sortDesc" title="名前 降順">降順</button>
@@ -250,6 +257,7 @@
     <span class="vname" id="vName">—</span>
     <span class="vmeta" id="vMeta"></span>
     <span class="spacer" style="flex:1"></span>
+    <button class="vbtn wide" id="dlAs" title="名前を付けて保存（元の形式のまま）">💾 保存</button>
     <button class="vbtn wide" id="dlPng" title="PNGで保存">PNG</button>
     <button class="vbtn wide" id="dlJpg" title="JPEGで保存">JPEG</button>
     <span class="sep"></span>
@@ -826,6 +834,123 @@ function download(type, ext, quality){
   }, type, quality);
 }
 
+/* ===== save / export (no external libs) ===== */
+function saveBlob(blob, filename){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+}
+function loadImage(url){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=()=>rej(new Error("画像の読み込みに失敗")); im.src=url; }); }
+function extOf(it, blob){
+  const m = it.name.match(/\.([a-z0-9]+)$/i);
+  if(m) return "." + m[1].toLowerCase();
+  return ({ 'image/png':'.png','image/jpeg':'.jpg','image/avif':'.avif','image/webp':'.webp','image/gif':'.gif','image/bmp':'.bmp' })[blob && blob.type] || ".png";
+}
+let _crcTable = null;
+function crc32(u8){
+  if(!_crcTable){ _crcTable = new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320 ^ (c>>>1)):(c>>>1); _crcTable[n]=c>>>0; } }
+  let crc = 0xFFFFFFFF;
+  for(let i=0;i<u8.length;i++) crc = (crc>>>8) ^ _crcTable[(crc ^ u8[i]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function buildZip(entries){           // entries: [{name, bytes:Uint8Array}] → STORED zip Blob
+  const enc=new TextEncoder(); const chunks=[]; const central=[]; let offset=0;
+  for(const e of entries){
+    const nameB=enc.encode(e.name), crc=crc32(e.bytes), sz=e.bytes.length;
+    const lh=new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0x0800,true);
+    lh.setUint16(8,0,true); lh.setUint16(10,0,true); lh.setUint16(12,0,true);
+    lh.setUint32(14,crc,true); lh.setUint32(18,sz,true); lh.setUint32(22,sz,true);
+    lh.setUint16(26,nameB.length,true); lh.setUint16(28,0,true);
+    chunks.push(new Uint8Array(lh.buffer), nameB, e.bytes);
+    const ch=new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true); ch.setUint16(8,0x0800,true);
+    ch.setUint16(10,0,true); ch.setUint16(12,0,true); ch.setUint16(14,0,true);
+    ch.setUint32(16,crc,true); ch.setUint32(20,sz,true); ch.setUint32(24,sz,true);
+    ch.setUint16(28,nameB.length,true); ch.setUint16(30,0,true); ch.setUint16(32,0,true);
+    ch.setUint16(34,0,true); ch.setUint16(36,0,true); ch.setUint32(38,0,true); ch.setUint32(42,offset,true);
+    central.push({ch:new Uint8Array(ch.buffer), nameB});
+    offset += 30 + nameB.length + sz;
+  }
+  const cdStart=offset; let cdSize=0;
+  for(const c of central){ chunks.push(c.ch, c.nameB); cdSize += 46 + c.nameB.length; }
+  const eo=new DataView(new ArrayBuffer(22));
+  eo.setUint32(0,0x06054b50,true); eo.setUint16(8,central.length,true); eo.setUint16(10,central.length,true);
+  eo.setUint32(12,cdSize,true); eo.setUint32(16,cdStart,true); eo.setUint16(20,0,true);
+  chunks.push(new Uint8Array(eo.buffer));
+  return new Blob(chunks, {type:'application/zip'});
+}
+function buildPdf(pages){              // pages: [{jpg:Uint8Array, w, h}] → PDF Blob (JPEG/DCTDecode)
+  const enc=new TextEncoder(); const chunks=[]; let len=0; const off={};
+  const W = s => { const u=(typeof s==='string')?enc.encode(s):s; chunks.push(u); len+=u.length; };
+  const N=pages.length;
+  W("%PDF-1.4\n");
+  off[1]=len; W("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+  const kids=pages.map((_,i)=>(3+i*3)+" 0 R").join(" ");
+  off[2]=len; W(`2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${N} >>\nendobj\n`);
+  for(let i=0;i<N;i++){
+    const p=pages[i], pageN=3+i*3, contN=4+i*3, imgN=5+i*3;
+    off[pageN]=len;
+    W(`${pageN} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${p.w} ${p.h}] /Resources << /XObject << /Im0 ${imgN} 0 R >> >> /Contents ${contN} 0 R >>\nendobj\n`);
+    const content=`q ${p.w} 0 0 ${p.h} 0 0 cm /Im0 Do Q\n`;
+    off[contN]=len; W(`${contN} 0 obj\n<< /Length ${enc.encode(content).length} >>\nstream\n${content}endstream\nendobj\n`);
+    off[imgN]=len;
+    W(`${imgN} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${p.jpg.length} >>\nstream\n`);
+    W(p.jpg); W("\nendstream\nendobj\n");
+  }
+  const xrefStart=len, total=2+3*N+1;
+  W(`xref\n0 ${total}\n0000000000 65535 f \n`);
+  for(let n=1;n<total;n++) W(String(off[n]).padStart(10,'0')+" 00000 n \n");
+  W(`trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`);
+  return new Blob(chunks, {type:'application/pdf'});
+}
+async function saveFolderZip(){
+  if(!gallery.length) return;
+  let nm = prompt("ZIPファイル名", base(selectedPath)||"images");
+  if(nm===null) return;
+  nm = (nm.trim()||"images").replace(/\.zip$/i,"") + ".zip";
+  const pad = Math.max(3, String(gallery.length).length);
+  try{
+    const entries=[];
+    for(let i=0;i<gallery.length;i++){
+      setStatus(`ZIP作成中… ${i+1}/${gallery.length}`);
+      const it=gallery[i], blob=await it.get();
+      entries.push({ name:String(i+1).padStart(pad,'0')+extOf(it,blob), bytes:new Uint8Array(await blob.arrayBuffer()) });
+    }
+    saveBlob(buildZip(entries), nm);
+  }catch(err){ alert("ZIP保存に失敗: "+err.message); }
+  updateCount();
+}
+async function saveFolderPdf(){
+  if(!gallery.length) return;
+  let nm = prompt("PDFファイル名", base(selectedPath)||"document");
+  if(nm===null) return;
+  nm = (nm.trim()||"document").replace(/\.pdf$/i,"") + ".pdf";
+  try{
+    const pages=[];
+    for(let i=0;i<gallery.length;i++){
+      setStatus(`PDF作成中… ${i+1}/${gallery.length}`);
+      const it=gallery[i], url=await itemURL(it), img=await loadImage(url);
+      const w=img.naturalWidth||1, h=img.naturalHeight||1;
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      const g=c.getContext('2d'); g.fillStyle="#fff"; g.fillRect(0,0,w,h); g.drawImage(img,0,0);
+      const jb=await new Promise(r=>c.toBlob(r,'image/jpeg',0.9));
+      pages.push({ jpg:new Uint8Array(await jb.arrayBuffer()), w, h });
+    }
+    saveBlob(buildPdf(pages), nm);
+  }catch(err){ alert("PDF保存に失敗: "+err.message); }
+  updateCount();
+}
+async function saveCurrentAs(){
+  const it = gallery[curIndex]; if(!it) return;
+  const def = it.name.replace(/\.[^.]+$/,"");
+  let nm = prompt("ファイル名（名前を付けて保存）", def);
+  if(nm===null) return;
+  const blob = await it.get();
+  let name = (nm.trim()||def);
+  if(!/\.[a-z0-9]+$/i.test(name)) name += extOf(it, blob);
+  saveBlob(blob, name);
+}
+
 /* ===== drag & drop / folder recursion ===== */
 function entryToList(entry, prefix, out){
   return new Promise(res=>{
@@ -859,6 +984,9 @@ $('#clearBtn').onclick=clearAll;
 $('#sortAsc').onclick=sortAsc;
 $('#sortDesc').onclick=sortDesc;
 $('#reverseBtn').onclick=reverseGallery;
+$('#saveZip').onclick=saveFolderZip;
+$('#savePdf').onclick=saveFolderPdf;
+$('#dlAs').onclick=saveCurrentAs;
 
 $('#closeV').onclick=closeViewer;
 $('#prevBtn').onclick=()=>step(-1); $('#navPrev').onclick=()=>step(-1);
@@ -901,7 +1029,8 @@ window.__app = { ingest, get library(){return library}, get gallery(){return gal
   get treeRoot(){return treeRoot}, get selectedPath(){return selectedPath},
   selectNode, nodeByPath, openViewer, parseZip, loadZipItems,
   loadPdfItems, pdfSourceFromFile, renderPdfPageBlob, hasPdfLib:()=>!!window.pdfjsLib,
-  sortAsc, sortDesc, reverseGallery, moveGalleryItem, get customOrder(){return customOrder} };
+  sortAsc, sortDesc, reverseGallery, moveGalleryItem, get customOrder(){return customOrder},
+  saveFolderZip, saveFolderPdf, saveCurrentAs, buildZip, buildPdf, crc32 };
 </script>
 </body>
 </html>
